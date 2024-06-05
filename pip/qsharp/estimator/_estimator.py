@@ -96,7 +96,7 @@ class QubitParams:
 class QECScheme:
     SURFACE_CODE = "surface_code"
     FLOQUET_CODE = "floquet_code"
-
+    COLOR_CODE = "color_code"
 
 def _check_error_rate(name, value):
     if value <= 0.0 or value >= 1.0:

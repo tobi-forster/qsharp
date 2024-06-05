@@ -166,6 +166,14 @@ impl Protocol {
                     Ok((Self::surface_code_measurement_based(), true))
                 }
             }
+        } else if model.name == "color_code"
+            || model.name == "colorCode"
+            || model.name == "color-code"
+        {
+            match qubit.instruction_set() {
+                PhysicalInstructionSet::GateBased => Ok((Self::color_code_gate_based(), true)),
+                PhysicalInstructionSet::Majorana => Err(InvalidFaultToleranceProtocol.into()),
+            }
         } else if model.name == "floquet_code"
             || model.name == "floquetCode"
             || model.name == "floquet-code"
@@ -293,6 +301,38 @@ impl Protocol {
         );
         let physical_qubits_per_logical_qubit_expr =
             String::from("2 * codeDistance * codeDistance");
+
+        let (logical_cycle_time, physical_qubits_per_logical_qubit) =
+            Protocol::parse_compiled_expressions(
+                &logical_cycle_time_expr,
+                &physical_qubits_per_logical_qubit_expr,
+            )
+            .expect("could not parse expressions");
+
+        Self {
+            error_correction_threshold,
+            crossing_prefactor,
+            logical_cycle_time_expr,
+            logical_cycle_time,
+            physical_qubits_per_logical_qubit_expr,
+            physical_qubits_per_logical_qubit,
+            max_code_distance: Self::default_max_code_distance(),
+        }
+    }
+
+    #[must_use]
+    pub fn color_code_gate_based() -> Self {
+        // [arXiv:1208.0928, Eq. (13)]
+        // [arXiv:1009.3686, Figs. 6-7]
+        let error_correction_threshold = 0.02;
+        // [arXiv:1208.0928, Eq. (11)]
+        let crossing_prefactor = 0.03;
+
+        let logical_cycle_time_expr = format!(
+            "(4 * {TWO_QUBIT_GATE_TIME} + 2 * {ONE_QUBIT_MEASUREMENT_TIME}) * codeDistance"
+        );
+        let physical_qubits_per_logical_qubit_expr =
+            String::from("(3 * (codeDistance * codeDistance) + 1)/4 ");
 
         let (logical_cycle_time, physical_qubits_per_logical_qubit) =
             Protocol::parse_compiled_expressions(
