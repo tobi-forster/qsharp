@@ -57,7 +57,7 @@ impl Overhead for LogicalResourceCounts {
         let qubit_padding = ((8 * self.num_qubits) as f64).sqrt().ceil() as u64 + 1;
 
         2 * self.num_qubits + qubit_padding
-    }
+    } // TODO
 
     fn logical_depth(&self, budget: &ErrorBudget) -> u64 {
         (self.measurement_count + self.rotation_count + self.t_count) * NUM_MEASUREMENTS_PER_R
