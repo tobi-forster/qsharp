@@ -122,4 +122,74 @@ namespace Kata.Verification {
         Message("Correct.");
         return true;
     }
+
+    operation PrepareAndSendMessage_Reference(qAlice : Qubit, basis : Pauli, state : Result) : (Bool, Bool) {
+        use qMessage = Qubit();
+        if state == One {
+            X(qMessage);
+        }
+        if basis != PauliZ {
+            H(qMessage);
+        }
+        if basis == PauliY {
+            S(qMessage);
+        }
+        let classicalBits = SendMessage_Reference(qAlice, qMessage);
+        Reset(qMessage);
+        return classicalBits;
+    }
+
+    operation ReconstructAndMeasureMessage_Reference(qBob : Qubit, (b1 : Bool, b2 : Bool), basis : Pauli) : Result {
+        ReconstructMessage_Reference(qBob, (b1, b2));
+        return Measure([basis], [qBob]);
+    }
+
+    // ------------------------------------------------------
+    // Runs teleportation for each state that is to be prepared and
+    // sent by Alice. Success is asserted after each teleportation.
+    // Also repeats for each state several times; this is because
+    // code is expected to take different paths each time since
+    // measurements done by Alice are not deterministic.
+    operation TeleportPreparedStateTestLoop(
+        prepareAndSendMessageOp : ((Qubit, Pauli, Result) => (Bool, Bool)), 
+        reconstructAndMeasureMessageOp : ((Qubit, (Bool, Bool), Pauli) => Result)
+        ) : Bool {
+        
+        let messages = [(PauliX, Zero, "|+⟩"), 
+                        (PauliX, One, "|-⟩"), 
+                        (PauliY, Zero, "|i⟩"), 
+                        (PauliY, One, "|-i⟩"), 
+                        (PauliZ, Zero, "|0⟩"), 
+                        (PauliZ, One, "|1⟩")];
+        let numRepetitions = 100;
+        use (qAlice, qBob) = (Qubit(), Qubit());
+        for (basis, sentState, stateName) in messages {
+            for j in 1 .. numRepetitions {
+                StatePrep_BellState(qAlice, qBob, 0);
+                let classicalBits = prepareAndSendMessageOp(qAlice, basis, sentState);
+                let receivedState = reconstructAndMeasureMessageOp(qBob, classicalBits, basis);
+                if sentState != receivedState {
+                    Message($"Received incorrect basis state when sending {stateName} in the {basis} basis.");
+                    ResetAll([qAlice, qBob]);
+                    return false;
+                }
+                ResetAll([qAlice, qBob]);
+            }
+        }
+        Message($"Correct");
+        return true;
+    }
+
+    operation EntangleThreeQubitsWrapper_Reference(qs : Qubit[]) : Unit is Adj {
+        let (qAlice, qBob, qCharlie) = (qs[0], qs[1], qs[2]);
+        // Starting with |000⟩
+        H(qBob);
+        // Now state is 1/sqrt(2) (|000⟩ + |010⟩)
+        CNOT(qBob, qCharlie);
+        // 1/sqrt(2) (|000⟩ + |011⟩)
+        H(qAlice);
+        // 1/2 (|000⟩ + |011⟩ + |100⟩ + |111⟩)
+        CNOT(qAlice, qCharlie);
+        // Final state:  1/2 (|000⟩ + |011⟩ + |101⟩ + |110⟩)
+    }
 }
