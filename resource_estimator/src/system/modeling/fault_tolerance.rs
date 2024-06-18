@@ -322,15 +322,16 @@ impl Protocol {
 
     #[must_use]
     pub fn color_code_gate_based() -> Self {
-        // [arXiv:1108.5738]
-        let error_correction_threshold = 0.008;
-        let crossing_prefactor = 0.03;
-        // physical qubits per logical qubit from FIG 2 from [arXiv:1108.5738]
+        // [arXiv:2402.13958]
+        let error_correction_threshold = 0.002;
+        // [arXiv:2402.13958]
+        let crossing_prefactor = 0.08;
+
         let logical_cycle_time_expr = format!(
-            "(6 * {TWO_QUBIT_GATE_TIME} + 2 * {ONE_QUBIT_MEASUREMENT_TIME}) * codeDistance"
+            "(12 * {TWO_QUBIT_GATE_TIME} + 2 * {ONE_QUBIT_MEASUREMENT_TIME}) * codeDistance"
         );
         let physical_qubits_per_logical_qubit_expr =
-            String::from("(((codeDistance * codeDistance) + codeDistance)/2) - 1/2 ");
+            String::from("(3 * codeDistance * codeDistance + 1)/4");
 
         let (logical_cycle_time, physical_qubits_per_logical_qubit) =
             Protocol::parse_compiled_expressions(
