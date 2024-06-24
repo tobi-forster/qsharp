@@ -46,7 +46,7 @@ pub struct LogicalResourceCounts {
 }
 
 /// Models the logical resources after layout
-///
+
 /// The logical resources comprise the logical depth, the number of qubits, and
 /// the number of T states.  If there are rotations, optionally the number of T
 /// gates per rotation are specified.
