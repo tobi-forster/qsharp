@@ -3,18 +3,20 @@
 
 use log::trace;
 use qsc::{
-    ast,
-    compile::{self, Error},
+    ast, compile,
     display::Lookup,
     error::WithSource,
     hir::{self, PackageId},
     incremental::Compiler,
     line_column::{Encoding, Position, Range},
-    resolve,
+    packages::{prepare_package_store, BuildableProgram},
+    project, resolve,
     target::Profile,
     CompileUnit, LanguageFeatures, PackageStore, PackageType, PassContext, SourceMap, Span,
 };
-use qsc_linter::LintConfig;
+use qsc_linter::{LintConfig, LintLevel};
+use qsc_project::PackageGraphSources;
+use std::mem::take;
 use std::sync::Arc;
 
 /// Represents an immutable compilation state that can be used
@@ -26,7 +28,8 @@ pub(crate) struct Compilation {
     /// The `PackageId` of the user package. User code
     /// is non-library code, i.e. all code except the std and core libs.
     pub user_package_id: PackageId,
-    pub errors: Vec<Error>,
+    pub project_errors: Vec<project::Error>,
+    pub compile_errors: Vec<compile::Error>,
     pub kind: CompilationKind,
 }
 
@@ -35,7 +38,9 @@ pub(crate) enum CompilationKind {
     /// An open Q# project.
     /// In an `OpenProject` compilation, the user package contains
     /// one or more sources, and a target profile.
-    OpenProject,
+    OpenProject {
+        package_graph_sources: PackageGraphSources,
+    },
     /// A Q# notebook. In a notebook compilation, the user package
     /// contains multiple `Source`s, with each source corresponding
     /// to a cell.
@@ -45,32 +50,36 @@ pub(crate) enum CompilationKind {
 impl Compilation {
     /// Creates a new `Compilation` by compiling sources.
     pub(crate) fn new(
-        sources: &[(Arc<str>, Arc<str>)],
         package_type: PackageType,
         target_profile: Profile,
         language_features: LanguageFeatures,
         lints_config: &[LintConfig],
+        package_graph_sources: PackageGraphSources,
+        project_errors: Vec<project::Error>,
     ) -> Self {
-        if sources.len() == 1 {
-            trace!("compiling single-file document {}", sources[0].0);
-        } else {
-            trace!("compiling package with {} sources", sources.len());
-        }
+        let mut buildable_program =
+            prepare_package_store(target_profile.into(), package_graph_sources.clone());
 
-        let source_map = SourceMap::new(sources.iter().map(|(x, y)| (x.clone(), y.clone())), None);
+        let mut compile_errors = take(&mut buildable_program.dependency_errors);
 
-        let mut package_store = PackageStore::new(compile::core());
-        let std_package_id =
-            package_store.insert(compile::std(&package_store, target_profile.into()));
+        let BuildableProgram {
+            store: mut package_store,
+            user_code,
+            user_code_dependencies,
+            ..
+        } = buildable_program;
+        let user_code = SourceMap::new(user_code.sources, None);
 
-        let (unit, mut errors) = compile::compile(
+        let (unit, mut this_errors) = compile::compile(
             &package_store,
-            &[std_package_id],
-            source_map,
+            &user_code_dependencies,
+            user_code,
             package_type,
             target_profile.into(),
             language_features,
         );
+
+        compile_errors.append(&mut this_errors);
 
         let package_id = package_store.insert(unit);
         let unit = package_store
@@ -78,20 +87,23 @@ impl Compilation {
             .expect("expected to find user package");
 
         run_fir_passes(
-            &mut errors,
+            &mut compile_errors,
             target_profile,
             &package_store,
             package_id,
             unit,
         );
 
-        run_linter_passes(lints_config, &mut errors, unit);
+        run_linter_passes(&mut compile_errors, &package_store, unit, lints_config);
 
         Self {
             package_store,
             user_package_id: package_id,
-            errors,
-            kind: CompilationKind::OpenProject,
+            kind: CompilationKind::OpenProject {
+                package_graph_sources,
+            },
+            compile_errors,
+            project_errors,
         }
     }
 
@@ -105,13 +117,15 @@ impl Compilation {
     where
         I: Iterator<Item = (Arc<str>, Arc<str>)>,
     {
+        let (std_id, store) = qsc::compile::package_store_with_stdlib(target_profile.into());
         trace!("compiling notebook");
         let mut compiler = Compiler::new(
-            true,
             SourceMap::default(),
             PackageType::Lib,
             target_profile.into(),
             language_features,
+            store,
+            &[(std_id, None)],
         )
         .expect("expected incremental compiler creation to succeed");
 
@@ -141,13 +155,14 @@ impl Compilation {
             unit,
         );
 
-        run_linter_passes(lints_config, &mut errors, unit);
+        run_linter_passes(&mut errors, &package_store, unit, lints_config);
 
         Self {
             package_store,
             user_package_id: package_id,
-            errors,
+            compile_errors: errors,
             kind: CompilationKind::Notebook,
+            project_errors: Vec::new(),
         }
     }
 
@@ -239,23 +254,31 @@ impl Compilation {
             .user_unit()
             .sources
             .iter()
-            .map(|source| (source.name.clone(), source.contents.clone()));
+            .map(|source| (source.name.clone(), source.contents.clone()))
+            .collect::<Vec<_>>();
 
         let new = match self.kind {
-            CompilationKind::OpenProject => Self::new(
-                &sources.collect::<Vec<_>>(),
+            CompilationKind::OpenProject {
+                ref package_graph_sources,
+            } => Self::new(
                 package_type,
                 target_profile,
                 language_features,
                 lints_config,
+                package_graph_sources.clone(),
+                Vec::new(), // project errors will stay the same
             ),
-            CompilationKind::Notebook => {
-                Self::new_notebook(sources, target_profile, language_features, lints_config)
-            }
+            CompilationKind::Notebook => Self::new_notebook(
+                sources.into_iter(),
+                target_profile,
+                language_features,
+                lints_config,
+            ),
         };
+
         self.package_store = new.package_store;
         self.user_package_id = new.user_package_id;
-        self.errors = new.errors;
+        self.compile_errors = new.compile_errors;
     }
 }
 
@@ -293,18 +316,20 @@ fn run_fir_passes(
 }
 
 /// Compute new lints and append them to the errors Vec.
-/// Lints are only computed if the erros vector is empty. For performance
+/// Lints are only computed if the errors vector is empty. For performance
 /// reasons we don't want to waste time running lints every few keystrokes,
 /// if the user is in the middle of typing a statement, for example.
 fn run_linter_passes(
-    config: &[LintConfig],
     errors: &mut Vec<WithSource<compile::ErrorKind>>,
+    package_store: &PackageStore,
     unit: &CompileUnit,
+    config: &[LintConfig],
 ) {
     if errors.is_empty() {
-        let lints = qsc::linter::run_lints(unit, Some(config));
+        let lints = qsc::linter::run_lints(package_store, unit, Some(config));
         let lints = lints
             .into_iter()
+            .filter(|lint| !matches!(lint.level, LintLevel::Allow))
             .map(|lint| WithSource::from_map(&unit.sources, qsc::compile::ErrorKind::Lint(lint)));
         errors.extend(lints);
     }

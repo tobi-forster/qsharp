@@ -25,15 +25,35 @@ use qsc_hir::{
     ty::{ParamId, Prim},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc};
 use std::{collections::hash_map::Entry, rc::Rc, str::FromStr, vec};
 use thiserror::Error;
 
 use crate::compile::preprocess::TrackedName;
 
-// All AST Path nodes get mapped
+// All AST Path nodes that are namespace paths get mapped
 // All AST Ident nodes get mapped, except those under AST Path nodes
+// The first Ident of an AST Path node that is a field accessor gets mapped instead of the Path node
 pub(super) type Names = IndexMap<NodeId, Res>;
+
+// If the path is a field accessor, returns the mapped node id of the first ident's declaration and the vec of part's idents.
+// Otherwise, returns None.
+// Field accessor paths have their leading segment mapped as a local variable, whereas namespace paths have their path id mapped.
+#[must_use]
+pub fn path_as_field_accessor(
+    names: &Names,
+    path: &ast::Path,
+) -> Option<(NodeId, Vec<ast::Ident>)> {
+    if path.segments.is_some() {
+        let parts: Vec<Ident> = path.into();
+        let first = parts.first().expect("path should have at least one part");
+        if let Some(&Res::Local(node_id)) = names.get(first.id) {
+            return Some((node_id, parts));
+        }
+    }
+    // If any of the above conditions are not met, return None.
+    None
+}
 
 /// A resolution. This connects a usage of a name with the declaration of that name by uniquely
 /// identifying the node that declared it.
@@ -336,6 +356,15 @@ impl GlobalScope {
     fn insert_or_find_namespace(&mut self, name: impl Into<Vec<Rc<str>>>) -> NamespaceId {
         self.namespaces.insert_or_find_namespace(name.into())
     }
+
+    /// Given a starting namespace, search from that namespace.
+    fn insert_or_find_namespace_from_root(
+        &mut self,
+        ns: Vec<Rc<str>>,
+        root: NamespaceId,
+    ) -> NamespaceId {
+        self.namespaces.insert_or_find_namespace_from_root(ns, root)
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -409,9 +438,6 @@ impl ExportImportVisitor<'_> {
 impl AstVisitor<'_> for ExportImportVisitor<'_> {
     fn visit_item(&mut self, item: &Item) {
         item.attrs.iter().for_each(|a| self.visit_attr(a));
-        item.visibility
-            .iter()
-            .for_each(|v| self.visit_visibility(v));
         match &*item.kind {
             ItemKind::ImportOrExport(decl) if decl.is_export() => self
                 .resolver
@@ -583,13 +609,41 @@ impl Resolver {
 
     fn resolve_path(&mut self, kind: NameKind, path: &ast::Path) -> Result<Res, Error> {
         let name = &path.name;
-        let namespace = &path.namespace;
+        let segments = &path.segments;
+
+        // First we check if the the path can be resolved as a field accessor.
+        // We do this by checking if the first part of the path is a local variable.
+        if let (NameKind::Term, Some(parts)) = (kind, segments) {
+            let parts: Vec<ast::Ident> = parts.clone().into();
+            let first = parts
+                .first()
+                .expect("path `parts` should have at least one element");
+            match resolve(
+                NameKind::Term,
+                &self.globals,
+                self.locals.get_scopes(&self.curr_scope_chain),
+                first,
+                &None,
+            ) {
+                Ok(res) if matches!(res, Res::Local(_)) => {
+                    // The path is a field accessor.
+                    self.names.insert(first.id, res);
+                    return Ok(res);
+                }
+                Err(err) if !matches!(err, Error::NotFound(_, _)) => return Err(err), // Local was found but has issues.
+                _ => {} // The path is assumed to not be a field accessor, so move on to process it as a namespace path.
+            }
+        }
+
+        // If the path is not a field accessor, we resolve it as a namespace path.
+        // This is done by passing in the last part of the path as the name to resolve,
+        // with the rest of the parts as the namespace segments.
         match resolve(
             kind,
             &self.globals,
             self.locals.get_scopes(&self.curr_scope_chain),
             name,
-            namespace,
+            segments,
         ) {
             Ok(res) => {
                 self.check_item_status(res, path.name.name.to_string(), path.span);
@@ -848,6 +902,8 @@ impl Resolver {
             } else {
                 ItemSource::Imported
             };
+
+            //            if self.dropped_names.contains(TrackedName { name: item.name(), namespace: () }
 
             if let Ok(Res::Item(id, _)) = term_result {
                 if is_export {
@@ -1303,14 +1359,26 @@ impl GlobalTable {
         errors
     }
 
-    pub(super) fn add_external_package(&mut self, id: PackageId, package: &hir::Package) {
+    pub(super) fn add_external_package(
+        &mut self,
+        id: PackageId,
+        package: &hir::Package,
+        alias: &Option<Arc<str>>,
+    ) {
+        let root = match alias {
+            Some(alias) => self
+                .scope
+                .insert_or_find_namespace(vec![Rc::from(&**alias)]),
+            None => self.scope.namespaces.root_id(),
+        };
+
         for global in global::iter_package(Some(id), package).filter(|global| {
             global.visibility == hir::Visibility::Public
                 || matches!(&global.kind, global::Kind::Term(t) if t.intrinsic)
         }) {
             let namespace = self
                 .scope
-                .insert_or_find_namespace(global.namespace.clone());
+                .insert_or_find_namespace_from_root(global.namespace.clone(), root);
 
             match (global.kind, global.visibility) {
                 (global::Kind::Ty(ty), hir::Visibility::Public) => {
@@ -1375,7 +1443,7 @@ pub(super) fn extract_field_name<'a>(names: &Names, expr: &'a ast::Expr) -> Opti
     // Follow the same reasoning as `is_field_update`.
     match &*expr.kind {
         ast::ExprKind::Path(path)
-            if path.namespace.is_none() && !matches!(names.get(path.id), Some(Res::Local(_))) =>
+            if path.segments.is_none() && !matches!(names.get(path.id), Some(Res::Local(_))) =>
         {
             Some(&path.name.name)
         }
@@ -1391,10 +1459,10 @@ fn is_field_update<'a>(
     // Disambiguate the update operator by looking at the index expression. If it's an
     // unqualified path that doesn't resolve to a local, assume that it's meant to be a field name.
     match &*index.kind {
-        ast::ExprKind::Path(path) if path.namespace.is_none() => !matches!(
+        ast::ExprKind::Path(path) if path.segments.is_none() => !matches!(
             {
                 let name = &path.name;
-                let namespace = &path.namespace;
+                let namespace = &path.segments;
                 resolve(NameKind::Term, globals, scopes, name, namespace)
             },
             Ok(Res::Local(_))
@@ -1440,7 +1508,6 @@ fn bind_callable(
     let res = Res::Item(item_id, status);
     names.insert(decl.name.id, res);
     let mut errors = Vec::new();
-
     match scope
         .terms
         .get_mut_or_default(namespace)
@@ -1462,12 +1529,14 @@ fn bind_callable(
             entry.insert(res);
         }
     }
+
     if decl_is_intrinsic(decl) && !scope.intrinsics.insert(Rc::clone(&decl.name.name)) {
         errors.push(Error::DuplicateIntrinsic(
             decl.name.name.to_string(),
             decl.name.span,
         ));
     }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -1484,6 +1553,7 @@ fn bind_ty(
     scope: &mut GlobalScope,
 ) -> Result<(), Vec<Error>> {
     let item_id = next_id();
+
     let status = ItemStatus::from_attrs(&ast_attrs_as_hir_attrs(item.attrs.as_ref()));
     let res = Res::Item(item_id, status);
     names.insert(name.id, res);
@@ -1872,9 +1942,7 @@ where
     }
 
     // Attempt to get the symbol from the global scope. If the namespace is None, use the candidate_namespace_id as a fallback
-    let res = namespace
-        //  .or(Some(candidate_namespace_id))
-        .and_then(|ns_id| globals.get(kind, ns_id, &provided_symbol_name.name));
+    let res = namespace.and_then(|ns_id| globals.get(kind, ns_id, &provided_symbol_name.name));
 
     // If a symbol was found, insert it into the candidates map
     if let Some(res) = res {

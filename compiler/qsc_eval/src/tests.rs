@@ -58,7 +58,7 @@ fn check_expr(file: &str, expr: &str, expect: &Expect) {
     let sources = SourceMap::new([("test".into(), file.into())], Some(expr.into()));
     let mut unit = compile(
         &store,
-        &[std_id],
+        &[(std_id, None)],
         sources,
         TargetCapabilityFlags::all(),
         LanguageFeatures::default(),
@@ -113,7 +113,7 @@ fn check_partial_eval_stmt(
     let sources = SourceMap::new([("test".into(), file.into())], Some(expr.into()));
     let mut unit = compile(
         &store,
-        &[std_id],
+        &[(std_id, None)],
         sources,
         TargetCapabilityFlags::all(),
         LanguageFeatures::default(),
@@ -417,16 +417,16 @@ fn block_qubit_use_array_invalid_count_expr() {
                             0,
                         ),
                         span: Span {
-                            lo: 2034,
-                            hi: 2091,
+                            lo: 2064,
+                            hi: 2121,
                         },
                     },
                 ),
                 [
                     Frame {
                         span: Span {
-                            lo: 2034,
-                            hi: 2091,
+                            lo: 2064,
+                            hi: 2121,
                         },
                         id: StoreItemId {
                             package: PackageId(
@@ -3691,6 +3691,123 @@ fn partial_app_mutable_arg() {
 }
 
 #[test]
+fn controlled_operation_with_duplicate_controls_fails() {
+    check_expr(
+        "",
+        "{
+            use ctl = Qubit();
+            use q = Qubit();
+            Controlled I([ctl, ctl], q);
+        }",
+        &expect![[r#"
+            (
+                QubitUniqueness(
+                    PackageSpan {
+                        package: PackageId(
+                            2,
+                        ),
+                        span: Span {
+                            lo: 86,
+                            hi: 101,
+                        },
+                    },
+                ),
+                [
+                    Frame {
+                        span: Span {
+                            lo: 74,
+                            hi: 101,
+                        },
+                        id: StoreItemId {
+                            package: PackageId(
+                                1,
+                            ),
+                            item: LocalItemId(
+                                123,
+                            ),
+                        },
+                        caller: PackageId(
+                            2,
+                        ),
+                        functor: FunctorApp {
+                            adjoint: false,
+                            controlled: 1,
+                        },
+                    },
+                ],
+            )
+        "#]],
+    );
+}
+
+#[test]
+fn controlled_operation_with_target_in_controls_fails() {
+    check_expr(
+        "",
+        "{
+            use ctl = Qubit();
+            use q = Qubit();
+            Controlled I([ctl, q], q);
+        }",
+        &expect![[r#"
+            (
+                QubitUniqueness(
+                    PackageSpan {
+                        package: PackageId(
+                            2,
+                        ),
+                        span: Span {
+                            lo: 86,
+                            hi: 99,
+                        },
+                    },
+                ),
+                [
+                    Frame {
+                        span: Span {
+                            lo: 74,
+                            hi: 99,
+                        },
+                        id: StoreItemId {
+                            package: PackageId(
+                                1,
+                            ),
+                            item: LocalItemId(
+                                123,
+                            ),
+                        },
+                        caller: PackageId(
+                            2,
+                        ),
+                        functor: FunctorApp {
+                            adjoint: false,
+                            controlled: 1,
+                        },
+                    },
+                ],
+            )
+        "#]],
+    );
+}
+
+#[test]
+fn controlled_operation_with_unique_controls_duplicate_targets_allowed() {
+    check_expr(
+        "",
+        "{
+            operation DoubleI(q0 : Qubit, q1 : Qubit) : Unit is Ctl {
+                I(q0);
+                I(q1);
+            }
+            use ctl = Qubit();
+            use q = Qubit();
+            Controlled DoubleI([ctl], (q, q));
+        }",
+        &expect!["()"],
+    );
+}
+
+#[test]
 fn partial_eval_simple_stmt() {
     check_partial_eval_stmt(
         "",
@@ -4072,7 +4189,7 @@ fn partial_eval_stmt_function_calls() {
                 Items:
                     Item 0 [41-102] (Public):
                         Namespace (Ident 1 [51-55] "Test"): Item 1
-                    Item 1 [62-100] (Public):
+                    Item 1 [62-100] (Internal):
                         Parent: 0
                         Callable 0 [62-100] (function):
                             name: Ident 0 [71-75] "Add1"
