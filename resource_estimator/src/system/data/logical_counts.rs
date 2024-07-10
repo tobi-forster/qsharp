@@ -54,9 +54,10 @@ impl Overhead for LogicalResourceCounts {
     // number of qubits per one logical qubit (part of Q in paper)
     fn logical_qubits(&self) -> u64 {
         // number of logical qubits for padding (part of Q in paper)
-        let qubit_padding = ((8 * self.num_qubits) as f64).sqrt().ceil() as u64 + 1;
+        // let qubit_padding = ((8 * self.num_qubits) as f64).sqrt().ceil() as u64 + 1;
 
-        2 * self.num_qubits + qubit_padding
+        // 2 * self.num_qubits + qubit_padding
+        (1.5 * self.num_qubits as f64).ceil() as u64
     } // TODO
 
     fn logical_depth(&self, budget: &ErrorBudget) -> u64 {
